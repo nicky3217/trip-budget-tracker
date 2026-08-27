@@ -540,6 +540,8 @@
     </div>
   </div>
 
+  <div id="errorBanner" style="display:none; margin-top:14px; background:#FBEAEA; border:1px solid var(--dancheong); color:var(--dancheong); padding:10px 14px; border-radius:8px; font-family:var(--mono); font-size:12px;"></div>
+
   <section class="card">
     <h2>Exchange Rate</h2>
     <p class="subtext">Set the current KRW per 1 USD rate. Update it any time — every conversion below recalculates instantly.</p>
@@ -628,11 +630,18 @@
   <span style="font-family:'IBM Plex Mono', monospace; font-size:11px; color:var(--ink-soft);">Shared data — visible and editable by anyone with this link.</span>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 (function(){
+  // ---------- Supabase config ----------
+  const SUPABASE_URL = 'https://mvwbnipgggqjlhwnckcw.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12d2JuaXBnZ2dxamxod25ja2N3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NTQwMzcsImV4cCI6MjEwMzQzMDAzN30.jTxYctiBQ7XRy9Ugj4Pylsr5mTShuOsRPHmE7AFhcrE';
+  const TABLE_NAME = 'trip_data';
+  const ROW_ID = 1;
+  const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
   const TRIP_START = new Date('2026-09-16T00:00:00');
   const TRIP_END = new Date('2026-10-01T00:00:00');
-  const STORAGE_KEY = 'korea-trip-budget-v1';
   const DEFAULT_FX = 1381;
 
   let editingCategoryId = null;
@@ -677,29 +686,70 @@
     return t;
   }
 
-  // ---------- storage ----------
+  // ---------- storage (Supabase) ----------
+  function describeError(e){
+    if (!e) return 'Unknown error';
+    if (e instanceof Error) return e.message;
+    // Supabase/Postgrest errors are plain objects: { message, details, hint, code }
+    const parts = [];
+    if (e.message) parts.push(e.message);
+    if (e.details) parts.push(e.details);
+    if (e.hint) parts.push('Hint: ' + e.hint);
+    if (e.code) parts.push('Code: ' + e.code);
+    if (parts.length) return parts.join(' — ');
+    try { return JSON.stringify(e); } catch(_) { return String(e); }
+  }
+
+  function showErrorBanner(msg){
+    const el = document.getElementById('errorBanner');
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
   async function loadData(){
     try{
-      const res = await window.storage.get(STORAGE_KEY, true);
-      if (res && res.value){
-        const parsed = JSON.parse(res.value);
-        data = Object.assign(data, parsed);
+      const { data: rows, error } = await supabaseClient
+        .from(TABLE_NAME)
+        .select('*')
+        .eq('id', ROW_ID)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (rows){
+        data.exchangeRate = Number(rows.exchange_rate) || DEFAULT_FX;
+        data.categories = rows.categories || data.categories;
+        data.expenses = rows.expenses || data.expenses;
+      } else {
+        // no row yet — create the initial one with our defaults
+        await saveData();
       }
     } catch(e){
-      // no existing data yet — use defaults
-      console.log('No saved data found, using defaults.');
+      const msg = describeError(e);
+      console.error('Load error, using local defaults:', msg, e);
+      showErrorBanner('Could not load shared data: ' + msg);
     }
   }
 
   let saveTimer = null;
   async function saveData(){
     try{
-      const result = await window.storage.set(STORAGE_KEY, JSON.stringify(data), true);
-      if (result){
-        flashSaved();
-      }
+      const { error } = await supabaseClient
+        .from(TABLE_NAME)
+        .upsert({
+          id: ROW_ID,
+          categories: data.categories,
+          expenses: data.expenses,
+          exchange_rate: data.exchangeRate,
+          updated_at: new Date().toISOString()
+        });
+      if (error) throw error;
+      flashSaved();
     } catch(e){
-      console.error('Storage error:', e);
+      const msg = describeError(e);
+      console.error('Storage error:', msg, e);
+      showErrorBanner('Could not save: ' + msg);
     }
   }
   function flashSaved(){
@@ -708,6 +758,23 @@
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => el.classList.remove('show'), 1200);
   }
+
+  // live sync: reflect changes made by the other person without needing a manual refresh
+  function subscribeToRemoteChanges(){
+    supabaseClient
+      .channel('trip_data_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: TABLE_NAME, filter: `id=eq.${ROW_ID}` }, (payload) => {
+        if (isSavingLocally) return; // avoid reacting to our own just-made write
+        const row = payload.new;
+        if (!row) return;
+        data.exchangeRate = Number(row.exchange_rate) || DEFAULT_FX;
+        data.categories = row.categories || data.categories;
+        data.expenses = row.expenses || data.expenses;
+        render();
+      })
+      .subscribe();
+  }
+  let isSavingLocally = false;
 
   // ---------- calculations ----------
   function totalBudget(){
@@ -1097,7 +1164,11 @@
 
   function persist(){
     render();
-    saveData();
+    isSavingLocally = true;
+    saveData().finally(() => {
+      // small delay so our own realtime echo (if any) doesn't trigger a re-render loop
+      setTimeout(() => { isSavingLocally = false; }, 400);
+    });
   }
 
   // ---------- event wiring ----------
@@ -1189,6 +1260,7 @@
     await loadData();
     wireEvents();
     render();
+    subscribeToRemoteChanges();
   })();
 
 })();
