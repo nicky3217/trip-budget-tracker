@@ -358,6 +358,27 @@
     padding:7px 12px;
   }
 
+  .fx-footnote{
+    font-size:11px;
+    color:var(--ink-soft);
+    margin-top:8px;
+    line-height:1.5;
+    font-style:italic;
+  }
+  .fx-gainloss{
+    margin-top:10px;
+    background:var(--ivory-deep);
+    border-left:3px solid var(--celadon-deep);
+    border-radius:4px;
+    padding:10px 12px;
+    font-size:12.5px;
+    color:var(--ink-soft);
+    line-height:1.5;
+  }
+  .fx-gainloss.loss{
+    border-left-color:var(--dancheong);
+  }
+
   /* CATEGORY LIST — mobile-first: stacked card by default */
   .cat-row{
     display:flex;
@@ -857,6 +878,10 @@
         <button type="button" class="toggle-btn" id="totalBudgetToggleBase" data-currency="base">USD</button>
       </div>
     </div>
+    <div class="fx-footnote" id="totalBudgetFootnote"></div>
+    <div id="fxGainLossBox" class="fx-gainloss" style="display:none;">
+      <div id="fxGainLossText"></div>
+    </div>
     <div class="budget-summary-row">
       <div>
         <div class="bs-label">Remaining</div>
@@ -1028,7 +1053,9 @@
     return {
       exchangeRate: 1,
       carryoverMode: 'carryover',
-      totalBudget: 0,
+      totalBudgetSourceCurrency: 'target',
+      totalBudgetEnteredAmount: 0,
+      totalBudgetRateAtSet: 1,
       categories: [
         { id: 'cat_food', name: 'Food', budget: 0 },
         { id: 'cat_shopping', name: 'Shopping', budget: 0 }
@@ -1148,6 +1175,14 @@
     if (error) throw error;
     if (!row) return null;
     const categories = row.categories || [];
+    const exchangeRate = Number(row.exchange_rate) || 1;
+
+    // migration fallback for rows saved before the entered-amount fields existed
+    const hasNewFields = row.total_budget_entered_amount !== null && row.total_budget_entered_amount !== undefined && Number(row.total_budget_entered_amount) > 0;
+    const legacyTotal = (row.total_budget !== null && row.total_budget !== undefined)
+      ? Number(row.total_budget)
+      : categories.reduce((s,c) => s + (Number(c.budget)||0), 0);
+
     return {
       code: row.code,
       destination: row.destination,
@@ -1155,11 +1190,11 @@
       endDate: row.end_date,
       baseCurrency: row.base_currency,
       targetCurrency: row.target_currency,
-      exchangeRate: Number(row.exchange_rate) || 1,
+      exchangeRate: exchangeRate,
       carryoverMode: row.carryover_mode || 'carryover',
-      totalBudget: (row.total_budget !== null && row.total_budget !== undefined)
-        ? Number(row.total_budget)
-        : categories.reduce((s,c) => s + (Number(c.budget)||0), 0), // fallback for rows saved before this column existed
+      totalBudgetSourceCurrency: hasNewFields ? (row.total_budget_source_currency || 'target') : 'target',
+      totalBudgetEnteredAmount: hasNewFields ? Number(row.total_budget_entered_amount) : legacyTotal,
+      totalBudgetRateAtSet: hasNewFields ? (Number(row.total_budget_rate_at_set) || exchangeRate) : exchangeRate,
       categories: categories,
       expenses: row.expenses || []
     };
@@ -1177,6 +1212,9 @@
       exchange_rate: 1,
       carryover_mode: 'carryover',
       total_budget: 0,
+      total_budget_source_currency: 'target',
+      total_budget_entered_amount: 0,
+      total_budget_rate_at_set: 1,
       categories: defaultTripPayload().categories,
       expenses: []
     };
@@ -1195,7 +1233,10 @@
           expenses: trip.expenses,
           exchange_rate: trip.exchangeRate,
           carryover_mode: trip.carryoverMode,
-          total_budget: trip.totalBudget,
+          total_budget: totalBudget(), // mirrored for convenience/back-compat; not the source of truth
+          total_budget_source_currency: trip.totalBudgetSourceCurrency,
+          total_budget_entered_amount: trip.totalBudgetEnteredAmount,
+          total_budget_rate_at_set: trip.totalBudgetRateAtSet,
           updated_at: new Date().toISOString()
         })
         .eq('code', trip.code);
@@ -1228,13 +1269,16 @@
         if (!row) return;
         trip.exchangeRate = Number(row.exchange_rate) || 1;
         trip.carryoverMode = row.carryover_mode || 'carryover';
-        trip.totalBudget = (row.total_budget !== null && row.total_budget !== undefined) ? Number(row.total_budget) : trip.totalBudget;
+        trip.totalBudgetSourceCurrency = row.total_budget_source_currency || trip.totalBudgetSourceCurrency;
+        trip.totalBudgetEnteredAmount = (row.total_budget_entered_amount !== null && row.total_budget_entered_amount !== undefined) ? Number(row.total_budget_entered_amount) : trip.totalBudgetEnteredAmount;
+        trip.totalBudgetRateAtSet = (row.total_budget_rate_at_set !== null && row.total_budget_rate_at_set !== undefined) ? Number(row.total_budget_rate_at_set) : trip.totalBudgetRateAtSet;
         trip.categories = row.categories || trip.categories;
         trip.expenses = row.expenses || trip.expenses;
         render();
       })
       .subscribe();
   }
+
 
   function persist(){
     render();
@@ -1247,7 +1291,32 @@
 
   // ---------- calculations ----------
   function totalBudget(){
-    return Number(trip.totalBudget) || 0;
+    // Effective total, always expressed in target (local) currency.
+    // If the total was set in home currency, this recomputes live against the current FX rate.
+    const amt = Number(trip.totalBudgetEnteredAmount) || 0;
+    if (trip.totalBudgetSourceCurrency === 'base'){
+      return amt * fx();
+    }
+    return amt;
+  }
+  function totalBudgetInCurrency(code){
+    const targetTotal = totalBudget();
+    if (code === trip.baseCurrency) return toBase(targetTotal);
+    return targetTotal;
+  }
+  function totalBudgetGainLoss(){
+    const amt = Number(trip.totalBudgetEnteredAmount) || 0;
+    const rateAtSet = Number(trip.totalBudgetRateAtSet) || fx();
+    if (trip.totalBudgetSourceCurrency === 'base'){
+      // entered in home currency — local total is live, so show how much it has moved, in local currency
+      const originalLocal = amt * rateAtSet;
+      const currentLocal = amt * fx();
+      return { amount: currentLocal - originalLocal, currency: trip.targetCurrency, mode: 'base', rateAtSet, rateNow: fx() };
+    }
+    // entered in local currency — local total is fixed; show the home-currency equivalent drift, informational only
+    const originalHome = rateAtSet > 0 ? amt / rateAtSet : 0;
+    const currentHome = amt / fx();
+    return { amount: currentHome - originalHome, currency: trip.baseCurrency, mode: 'target', rateAtSet, rateNow: fx() };
   }
   function categoriesSum(){
     return trip.categories.reduce((s,c) => s + (Number(c.budget)||0), 0);
@@ -1456,11 +1525,8 @@
   function renderBudgetSummary(){
     const input = document.getElementById('totalBudgetInput');
     if (document.activeElement !== input){
-      const displayAmount = totalBudgetDisplayCurrency === 'base'
-        ? toBase(totalBudget())
-        : totalBudget();
       const displayCode = totalBudgetDisplayCurrency === 'base' ? trip.baseCurrency : trip.targetCurrency;
-      input.value = roundForCurrency(displayAmount, displayCode);
+      input.value = roundForCurrency(totalBudgetInCurrency(displayCode), displayCode);
     }
 
     const targetBtn = document.getElementById('totalBudgetToggleTarget');
@@ -1469,6 +1535,35 @@
     baseBtn.textContent = trip.baseCurrency;
     targetBtn.classList.toggle('active', totalBudgetDisplayCurrency === 'target');
     baseBtn.classList.toggle('active', totalBudgetDisplayCurrency === 'base');
+
+    // footnote explaining the mechanism
+    document.getElementById('totalBudgetFootnote').textContent =
+      '* Entering this in ' + trip.baseCurrency + ' ties your ' + trip.targetCurrency +
+      ' daily budget to the live exchange rate — it moves if the rate moves. Entering it in ' +
+      trip.targetCurrency + ' keeps your daily budget fixed regardless of rate changes.';
+
+    // FX gain/loss box
+    const gainLoss = totalBudgetGainLoss();
+    const glBox = document.getElementById('fxGainLossBox');
+    const glText = document.getElementById('fxGainLossText');
+    if (Math.abs(gainLoss.amount) >= 1){
+      glBox.style.display = 'block';
+      glBox.classList.toggle('loss', gainLoss.amount < 0);
+      const changeWord = gainLoss.amount >= 0 ? 'gained' : 'lost';
+      const amountText = fmtCurrency(Math.abs(gainLoss.amount), gainLoss.currency);
+      if (gainLoss.mode === 'base'){
+        glText.textContent = 'Because your total was set in ' + trip.baseCurrency + ', your ' + trip.targetCurrency +
+          ' budget has ' + changeWord + ' ' + amountText + ' since you set it, as the rate moved from ' +
+          roundForCurrency(gainLoss.rateAtSet, trip.targetCurrency) + ' to ' + roundForCurrency(gainLoss.rateNow, trip.targetCurrency) +
+          '. Your daily allowance reflects this automatically.';
+      } else {
+        glText.textContent = 'Informational only: in ' + trip.baseCurrency + ' terms, your fixed ' + trip.targetCurrency +
+          ' budget is now worth ' + amountText + ' ' + (gainLoss.amount >= 0 ? 'more' : 'less') +
+          ' than when you set it. Your actual ' + trip.targetCurrency + ' budget hasn\'t changed.';
+      }
+    } else {
+      glBox.style.display = 'none';
+    }
 
     const todayStr = toISODate(clampedToday());
     const remaining = totalBudget() - totalSpent();
@@ -1866,17 +1961,19 @@
       const enteredValue = Number(e.target.value);
       if (isNaN(enteredValue) || enteredValue < 0) return;
 
-      // convert entered amount into target currency (the internal unit for all budgets)
-      const newTotal = totalBudgetDisplayCurrency === 'base'
-        ? enteredValue * fx()
-        : enteredValue;
-
-      trip.totalBudget = Math.round(newTotal);
+      // Whichever currency the toggle is on becomes the "source of truth" currency for this total.
+      // Entering in home currency ties the local total to the live FX rate; entering in local currency fixes it.
+      trip.totalBudgetSourceCurrency = totalBudgetDisplayCurrency; // 'target' or 'base'
+      trip.totalBudgetEnteredAmount = enteredValue;
+      trip.totalBudgetRateAtSet = fx();
       persist();
     });
 
     document.getElementById('matchCategoriesBtn').addEventListener('click', () => {
-      trip.totalBudget = Math.round(categoriesSum());
+      // categories are always tracked in local currency, so this sets a fixed local-currency total
+      trip.totalBudgetSourceCurrency = 'target';
+      trip.totalBudgetEnteredAmount = Math.round(categoriesSum());
+      trip.totalBudgetRateAtSet = fx();
       persist();
     });
     document.getElementById('scaleCategoriesBtn').addEventListener('click', () => {
