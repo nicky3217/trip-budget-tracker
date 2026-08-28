@@ -269,6 +269,30 @@
   .bs-value.surplus{ color:var(--celadon-deep); }
   .bs-value.deficit{ color:var(--dancheong); }
 
+  .currency-toggle{
+    display:inline-flex;
+    border:1px solid var(--line);
+    border-radius:7px;
+    overflow:hidden;
+  }
+  .toggle-btn{
+    font-family:var(--mono);
+    font-size:12.5px;
+    font-weight:600;
+    background:var(--ivory);
+    color:var(--ink-soft);
+    border:none;
+    padding:9px 14px;
+    cursor:pointer;
+  }
+  .toggle-btn + .toggle-btn{
+    border-left:1px solid var(--line);
+  }
+  .toggle-btn.active{
+    background:var(--ink);
+    color:var(--ivory);
+  }
+
   /* CATEGORY LIST — mobile-first: stacked card by default */
   .cat-row{
     display:flex;
@@ -763,7 +787,10 @@
     <div class="fx-row">
       <label for="totalBudgetInput">Total budget</label>
       <input type="number" id="totalBudgetInput" min="0" class="fx-input" style="width:180px;">
-      <label id="totalBudgetCurrencyLabel">KRW</label>
+      <div class="currency-toggle">
+        <button type="button" class="toggle-btn" id="totalBudgetToggleTarget" data-currency="target">KRW</button>
+        <button type="button" class="toggle-btn" id="totalBudgetToggleBase" data-currency="base">USD</button>
+      </div>
     </div>
     <div class="budget-summary-row">
       <div>
@@ -902,6 +929,11 @@
     const formatted = num.toLocaleString('en-US', { minimumFractionDigits:decimals, maximumFractionDigits:decimals });
     return currencySymbol(code) + formatted;
   }
+  function roundForCurrency(amount, code){
+    const decimals = ZERO_DECIMAL.has(code) ? 0 : 2;
+    const factor = Math.pow(10, decimals);
+    return Math.round((Number(amount) || 0) * factor) / factor;
+  }
 
   // ---------- state ----------
   let trip = null; // { code, destination, startDate, endDate, baseCurrency, targetCurrency, exchangeRate, categories, expenses }
@@ -909,6 +941,7 @@
   let editingExpenseId = null;
   let isSavingLocally = false;
   let realtimeChannel = null;
+  let totalBudgetDisplayCurrency = 'target'; // 'target' or 'base' — which currency the Trip Budget input shows/accepts
 
   function defaultTripPayload(){
     return {
@@ -1286,9 +1319,19 @@
   function renderBudgetSummary(){
     const input = document.getElementById('totalBudgetInput');
     if (document.activeElement !== input){
-      input.value = Math.round(totalBudget());
+      const displayAmount = totalBudgetDisplayCurrency === 'base'
+        ? toBase(totalBudget())
+        : totalBudget();
+      const displayCode = totalBudgetDisplayCurrency === 'base' ? trip.baseCurrency : trip.targetCurrency;
+      input.value = roundForCurrency(displayAmount, displayCode);
     }
-    document.getElementById('totalBudgetCurrencyLabel').textContent = trip.targetCurrency;
+
+    const targetBtn = document.getElementById('totalBudgetToggleTarget');
+    const baseBtn = document.getElementById('totalBudgetToggleBase');
+    targetBtn.textContent = trip.targetCurrency;
+    baseBtn.textContent = trip.baseCurrency;
+    targetBtn.classList.toggle('active', totalBudgetDisplayCurrency === 'target');
+    baseBtn.classList.toggle('active', totalBudgetDisplayCurrency === 'base');
 
     const todayStr = toISODate(clampedToday());
     const remaining = totalBudget() - totalSpent();
@@ -1668,8 +1711,14 @@
     });
 
     document.getElementById('totalBudgetInput').addEventListener('change', (e) => {
-      const newTotal = Number(e.target.value);
-      if (isNaN(newTotal) || newTotal < 0) return;
+      const enteredValue = Number(e.target.value);
+      if (isNaN(enteredValue) || enteredValue < 0) return;
+
+      // convert entered amount into target currency (the internal unit for all budgets)
+      const newTotal = totalBudgetDisplayCurrency === 'base'
+        ? enteredValue * fx()
+        : enteredValue;
+
       const oldTotal = totalBudget();
 
       if (trip.categories.length === 0){
@@ -1677,7 +1726,7 @@
         trip.categories.push({
           id: 'cat_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
           name: 'General',
-          budget: newTotal
+          budget: Math.round(newTotal)
         });
       } else if (oldTotal > 0){
         // scale every category proportionally so ratios are preserved
@@ -1691,6 +1740,15 @@
         trip.categories.forEach(c => { c.budget = share; });
       }
       persist();
+    });
+
+    document.getElementById('totalBudgetToggleTarget').addEventListener('click', () => {
+      totalBudgetDisplayCurrency = 'target';
+      renderBudgetSummary();
+    });
+    document.getElementById('totalBudgetToggleBase').addEventListener('click', () => {
+      totalBudgetDisplayCurrency = 'base';
+      renderBudgetSummary();
     });
 
     document.getElementById('modeCarryover').addEventListener('change', (e) => {
@@ -1808,6 +1866,7 @@
         return;
       }
       trip = found;
+      totalBudgetDisplayCurrency = 'target';
       showTripView();
       render();
       subscribeToRemoteChanges();
