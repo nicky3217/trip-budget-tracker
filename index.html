@@ -245,6 +245,51 @@
     flex-shrink:0;
   }
 
+  .stub-view-toggle{
+    margin-top:12px;
+    border-color:rgba(246,242,232,0.3);
+  }
+  .stub-view-toggle .toggle-btn{
+    background:transparent;
+    color:rgba(246,242,232,0.75);
+  }
+  .stub-view-toggle .toggle-btn + .toggle-btn{
+    border-left:1px solid rgba(246,242,232,0.3);
+  }
+  .stub-view-toggle .toggle-btn.active{
+    background:rgba(246,242,232,0.15);
+    color:var(--ivory);
+  }
+  .stub-category-list{
+    margin-top:10px;
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+  }
+  .stub-cat-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    font-family:var(--mono);
+    font-size:12.5px;
+    color:rgba(246,242,232,0.9);
+    gap:10px;
+  }
+  .stub-cat-row .stub-cat-name{
+    font-family:var(--serif);
+    font-size:13.5px;
+    color:var(--ivory);
+  }
+  .stub-cat-row .stub-cat-amt{
+    text-align:right;
+    white-space:nowrap;
+  }
+  .stub-cat-row .stub-cat-amt .usd-sub{
+    display:block;
+    font-size:10.5px;
+    color:var(--gold);
+  }
+
   /* TRIP BUDGET SUMMARY */
   .budget-summary-row{
     display:flex;
@@ -291,6 +336,26 @@
   .toggle-btn.active{
     background:var(--ink);
     color:var(--ivory);
+  }
+
+  .mismatch-warning{
+    margin-top:16px;
+    background:#FBF3E4;
+    border:1px solid var(--gold);
+    border-radius:8px;
+    padding:12px 14px;
+    font-size:13px;
+    color:var(--ink);
+  }
+  .mismatch-actions{
+    display:flex;
+    gap:10px;
+    margin-top:10px;
+    flex-wrap:wrap;
+  }
+  .mismatch-actions .ghost{
+    font-size:11.5px;
+    padding:7px 12px;
   }
 
   /* CATEGORY LIST — mobile-first: stacked card by default */
@@ -783,7 +848,7 @@
 
   <section class="card">
     <h2>Trip Budget</h2>
-    <p class="subtext">The total across all categories. Editing this scales your category budgets proportionally.</p>
+    <p class="subtext">Your overall trip goal. Categories are tracked separately — set this to whatever total you're planning for.</p>
     <div class="fx-row">
       <label for="totalBudgetInput">Total budget</label>
       <input type="number" id="totalBudgetInput" min="0" class="fx-input" style="width:180px;">
@@ -802,6 +867,13 @@
         <div class="bs-value" id="totalSurplusValue">—</div>
       </div>
     </div>
+    <div id="budgetMismatchWarning" class="mismatch-warning" style="display:none;">
+      <div id="mismatchText"></div>
+      <div class="mismatch-actions">
+        <button class="ghost" id="matchCategoriesBtn">Set total to match categories</button>
+        <button class="ghost" id="scaleCategoriesBtn">Scale categories to match total</button>
+      </div>
+    </div>
   </section>
 
   <section class="stub">
@@ -809,6 +881,14 @@
       <div class="label" id="stubLabel">Today's Allowance</div>
       <div class="krw" id="stubKrw">₩0</div>
       <div class="usd" id="stubUsd">$0.00</div>
+
+      <div class="currency-toggle stub-view-toggle">
+        <button type="button" class="toggle-btn" id="stubViewTotal" data-view="total">Total</button>
+        <button type="button" class="toggle-btn" id="stubViewCategory" data-view="category">By Category</button>
+      </div>
+
+      <div id="stubCategoryList" class="stub-category-list" style="display:none;"></div>
+
       <div class="stub-breakdown" id="stubBreakdown" style="display:none;"></div>
       <div class="mode-radios">
         <label class="mode-radio">
@@ -942,11 +1022,13 @@
   let isSavingLocally = false;
   let realtimeChannel = null;
   let totalBudgetDisplayCurrency = 'target'; // 'target' or 'base' — which currency the Trip Budget input shows/accepts
+  let stubViewMode = 'total'; // 'total' or 'category' — what the daily allowance breakdown shows
 
   function defaultTripPayload(){
     return {
       exchangeRate: 1,
       carryoverMode: 'carryover',
+      totalBudget: 0,
       categories: [
         { id: 'cat_food', name: 'Food', budget: 0 },
         { id: 'cat_shopping', name: 'Shopping', budget: 0 }
@@ -1065,6 +1147,7 @@
       .maybeSingle();
     if (error) throw error;
     if (!row) return null;
+    const categories = row.categories || [];
     return {
       code: row.code,
       destination: row.destination,
@@ -1074,7 +1157,10 @@
       targetCurrency: row.target_currency,
       exchangeRate: Number(row.exchange_rate) || 1,
       carryoverMode: row.carryover_mode || 'carryover',
-      categories: row.categories || [],
+      totalBudget: (row.total_budget !== null && row.total_budget !== undefined)
+        ? Number(row.total_budget)
+        : categories.reduce((s,c) => s + (Number(c.budget)||0), 0), // fallback for rows saved before this column existed
+      categories: categories,
       expenses: row.expenses || []
     };
   }
@@ -1090,6 +1176,7 @@
       target_currency: payload.targetCurrency,
       exchange_rate: 1,
       carryover_mode: 'carryover',
+      total_budget: 0,
       categories: defaultTripPayload().categories,
       expenses: []
     };
@@ -1108,6 +1195,7 @@
           expenses: trip.expenses,
           exchange_rate: trip.exchangeRate,
           carryover_mode: trip.carryoverMode,
+          total_budget: trip.totalBudget,
           updated_at: new Date().toISOString()
         })
         .eq('code', trip.code);
@@ -1140,6 +1228,7 @@
         if (!row) return;
         trip.exchangeRate = Number(row.exchange_rate) || 1;
         trip.carryoverMode = row.carryover_mode || 'carryover';
+        trip.totalBudget = (row.total_budget !== null && row.total_budget !== undefined) ? Number(row.total_budget) : trip.totalBudget;
         trip.categories = row.categories || trip.categories;
         trip.expenses = row.expenses || trip.expenses;
         render();
@@ -1158,6 +1247,9 @@
 
   // ---------- calculations ----------
   function totalBudget(){
+    return Number(trip.totalBudget) || 0;
+  }
+  function categoriesSum(){
     return trip.categories.reduce((s,c) => s + (Number(c.budget)||0), 0);
   }
   function totalSpent(){
@@ -1176,6 +1268,12 @@
   }
   function categorySpent(catId){
     return trip.expenses.filter(e => e.categoryId === catId)
+      .reduce((s,e) => s + (Number(e.amount)||0), 0);
+  }
+  function categorySpentBefore(catId, dateStr){
+    const d = fromISODate(dateStr);
+    return trip.expenses
+      .filter(e => e.categoryId === catId && fromISODate(e.date) < d)
       .reduce((s,e) => s + (Number(e.amount)||0), 0);
   }
   function remainingDaysFrom(dateStr){
@@ -1201,6 +1299,17 @@
       return originalDailyRate();
     }
     const remaining = totalBudget() - spentBefore(dateStr);
+    const days = remainingDaysFrom(dateStr);
+    if (days <= 0) return 0;
+    return remaining / days;
+  }
+  function categoryAllowanceForDay(cat, dateStr){
+    const budget = Number(cat.budget) || 0;
+    if (trip.carryoverMode === 'separate'){
+      const days = totalTripDaysCount();
+      return days <= 0 ? 0 : budget / days;
+    }
+    const remaining = budget - categorySpentBefore(cat.id, dateStr);
     const days = remainingDaysFrom(dateStr);
     if (days <= 0) return 0;
     return remaining / days;
@@ -1314,6 +1423,34 @@
       breakdownEl.style.display = 'block';
       breakdownEl.innerHTML = 'Base rate ' + fmtTarget(base) + '/day, ' + adjLabel + ' spread across remaining days';
     }
+
+    // Total vs By Category toggle
+    const totalBtn = document.getElementById('stubViewTotal');
+    const catBtn = document.getElementById('stubViewCategory');
+    totalBtn.classList.toggle('active', stubViewMode === 'total');
+    catBtn.classList.toggle('active', stubViewMode === 'category');
+
+    const catListEl = document.getElementById('stubCategoryList');
+    if (stubViewMode === 'category'){
+      catListEl.style.display = 'flex';
+      catListEl.innerHTML = '';
+      if (trip.categories.length === 0){
+        catListEl.innerHTML = '<div class="stub-cat-row"><span>No categories yet</span></div>';
+      } else {
+        trip.categories.forEach(cat => {
+          const catAllowance = categoryAllowanceForDay(cat, todayStr);
+          const row = document.createElement('div');
+          row.className = 'stub-cat-row';
+          row.innerHTML =
+            '<span class="stub-cat-name">' + escapeHtml(cat.name) + '</span>' +
+            '<span class="stub-cat-amt">' + fmtTarget(catAllowance) +
+            '<span class="usd-sub">' + fmtBase(toBase(catAllowance)) + '</span></span>';
+          catListEl.appendChild(row);
+        });
+      }
+    } else {
+      catListEl.style.display = 'none';
+    }
   }
 
   function renderBudgetSummary(){
@@ -1341,6 +1478,21 @@
     const surplusEl = document.getElementById('totalSurplusValue');
     surplusEl.textContent = (surplus >= 0 ? '+' : '−') + fmtTarget(Math.abs(surplus));
     surplusEl.className = 'bs-value ' + (surplus >= 0 ? 'surplus' : 'deficit');
+
+    // warn when category budgets don't add up to the overall trip budget
+    const catSum = categoriesSum();
+    const total = totalBudget();
+    const gap = total - catSum;
+    const warningEl = document.getElementById('budgetMismatchWarning');
+    if (Math.abs(gap) >= 1){
+      warningEl.style.display = 'block';
+      const gapText = gap > 0
+        ? ('Your categories only add up to ' + fmtTarget(catSum) + ' — that leaves ' + fmtTarget(gap) + ' of your trip budget unallocated.')
+        : ('Your categories add up to ' + fmtTarget(catSum) + ' — that\'s ' + fmtTarget(Math.abs(gap)) + ' more than your trip budget of ' + fmtTarget(total) + '.');
+      document.getElementById('mismatchText').textContent = '⚠ ' + gapText;
+    } else {
+      warningEl.style.display = 'none';
+    }
   }
 
 
@@ -1719,25 +1871,29 @@
         ? enteredValue * fx()
         : enteredValue;
 
-      const oldTotal = totalBudget();
+      trip.totalBudget = Math.round(newTotal);
+      persist();
+    });
 
-      if (trip.categories.length === 0){
-        // no categories exist yet — create one to hold the whole budget
+    document.getElementById('matchCategoriesBtn').addEventListener('click', () => {
+      trip.totalBudget = Math.round(categoriesSum());
+      persist();
+    });
+    document.getElementById('scaleCategoriesBtn').addEventListener('click', () => {
+      const target = totalBudget();
+      const current = categoriesSum();
+      if (current > 0){
+        const ratio = target / current;
+        trip.categories.forEach(c => { c.budget = Math.round((Number(c.budget)||0) * ratio); });
+      } else if (trip.categories.length > 0){
+        const share = Math.round(target / trip.categories.length);
+        trip.categories.forEach(c => { c.budget = share; });
+      } else {
         trip.categories.push({
           id: 'cat_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
           name: 'General',
-          budget: Math.round(newTotal)
+          budget: Math.round(target)
         });
-      } else if (oldTotal > 0){
-        // scale every category proportionally so ratios are preserved
-        const ratio = newTotal / oldTotal;
-        trip.categories.forEach(c => {
-          c.budget = Math.round((Number(c.budget) || 0) * ratio);
-        });
-      } else {
-        // old total was 0 — split the new amount evenly across existing categories
-        const share = Math.round(newTotal / trip.categories.length);
-        trip.categories.forEach(c => { c.budget = share; });
       }
       persist();
     });
@@ -1749,6 +1905,15 @@
     document.getElementById('totalBudgetToggleBase').addEventListener('click', () => {
       totalBudgetDisplayCurrency = 'base';
       renderBudgetSummary();
+    });
+
+    document.getElementById('stubViewTotal').addEventListener('click', () => {
+      stubViewMode = 'total';
+      renderStub();
+    });
+    document.getElementById('stubViewCategory').addEventListener('click', () => {
+      stubViewMode = 'category';
+      renderStub();
     });
 
     document.getElementById('modeCarryover').addEventListener('change', (e) => {
@@ -1867,6 +2032,7 @@
       }
       trip = found;
       totalBudgetDisplayCurrency = 'target';
+      stubViewMode = 'total';
       showTripView();
       render();
       subscribeToRemoteChanges();
