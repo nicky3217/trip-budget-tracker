@@ -216,6 +216,58 @@
     color:rgba(246,242,232,0.75);
     line-height:1.7;
   }
+  .stub-breakdown{
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:rgba(246,242,232,0.65);
+    margin-top:6px;
+    line-height:1.6;
+  }
+  .mode-radios{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+    margin-top:14px;
+  }
+  .mode-radio{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:rgba(246,242,232,0.85);
+    cursor:pointer;
+  }
+  .mode-radio input{
+    accent-color:var(--gold);
+    width:14px;
+    height:14px;
+    flex-shrink:0;
+  }
+
+  /* TRIP BUDGET SUMMARY */
+  .budget-summary-row{
+    display:flex;
+    gap:28px;
+    margin-top:16px;
+    flex-wrap:wrap;
+  }
+  .bs-label{
+    font-family:var(--mono);
+    font-size:10.5px;
+    text-transform:uppercase;
+    letter-spacing:1px;
+    color:var(--ink-soft);
+    margin-bottom:4px;
+  }
+  .bs-value{
+    font-family:var(--mono);
+    font-size:18px;
+    font-weight:600;
+    color:var(--ink);
+  }
+  .bs-value.surplus{ color:var(--celadon-deep); }
+  .bs-value.deficit{ color:var(--dancheong); }
 
   /* CATEGORY LIST — mobile-first: stacked card by default */
   .cat-row{
@@ -705,11 +757,42 @@
     </div>
   </section>
 
+  <section class="card">
+    <h2>Trip Budget</h2>
+    <p class="subtext">The total across all categories. Editing this scales your category budgets proportionally.</p>
+    <div class="fx-row">
+      <label for="totalBudgetInput">Total budget</label>
+      <input type="number" id="totalBudgetInput" min="0" class="fx-input" style="width:180px;">
+      <label id="totalBudgetCurrencyLabel">KRW</label>
+    </div>
+    <div class="budget-summary-row">
+      <div>
+        <div class="bs-label">Remaining</div>
+        <div class="bs-value" id="totalRemainingValue">—</div>
+      </div>
+      <div>
+        <div class="bs-label">Surplus / Deficit so far</div>
+        <div class="bs-value" id="totalSurplusValue">—</div>
+      </div>
+    </div>
+  </section>
+
   <section class="stub">
     <div>
       <div class="label" id="stubLabel">Today's Allowance</div>
       <div class="krw" id="stubKrw">₩0</div>
       <div class="usd" id="stubUsd">$0.00</div>
+      <div class="stub-breakdown" id="stubBreakdown" style="display:none;"></div>
+      <div class="mode-radios">
+        <label class="mode-radio">
+          <input type="radio" name="carryoverMode" value="carryover" id="modeCarryover">
+          Carry surplus/deficit into future days
+        </label>
+        <label class="mode-radio">
+          <input type="radio" name="carryoverMode" value="separate" id="modeSeparate">
+          Keep daily budget flat, track separately
+        </label>
+      </div>
     </div>
     <div class="meta" id="stubMeta"></div>
   </section>
@@ -726,6 +809,7 @@
   </section>
 
   <section class="card">
+
     <h2 id="expFormTitle">Log an Expense</h2>
     <p class="subtext" id="expFormSubtext">Pick any date in the trip — past or future — to add or backfill an entry.</p>
     <div class="log-form">
@@ -829,6 +913,7 @@
   function defaultTripPayload(){
     return {
       exchangeRate: 1,
+      carryoverMode: 'carryover',
       categories: [
         { id: 'cat_food', name: 'Food', budget: 0 },
         { id: 'cat_shopping', name: 'Shopping', budget: 0 }
@@ -955,6 +1040,7 @@
       baseCurrency: row.base_currency,
       targetCurrency: row.target_currency,
       exchangeRate: Number(row.exchange_rate) || 1,
+      carryoverMode: row.carryover_mode || 'carryover',
       categories: row.categories || [],
       expenses: row.expenses || []
     };
@@ -970,6 +1056,7 @@
       base_currency: payload.baseCurrency,
       target_currency: payload.targetCurrency,
       exchange_rate: 1,
+      carryover_mode: 'carryover',
       categories: defaultTripPayload().categories,
       expenses: []
     };
@@ -987,6 +1074,7 @@
           categories: trip.categories,
           expenses: trip.expenses,
           exchange_rate: trip.exchangeRate,
+          carryover_mode: trip.carryoverMode,
           updated_at: new Date().toISOString()
         })
         .eq('code', trip.code);
@@ -1018,6 +1106,7 @@
         const row = payload.new;
         if (!row) return;
         trip.exchangeRate = Number(row.exchange_rate) || 1;
+        trip.carryoverMode = row.carryover_mode || 'carryover';
         trip.categories = row.categories || trip.categories;
         trip.expenses = row.expenses || trip.expenses;
         render();
@@ -1032,6 +1121,7 @@
       setTimeout(() => { isSavingLocally = false; }, 400);
     });
   }
+
 
   // ---------- calculations ----------
   function totalBudget(){
@@ -1059,7 +1149,24 @@
     const d = fromISODate(dateStr);
     return dayDiff(d, tripEnd()) + 1;
   }
+  function totalTripDaysCount(){
+    return dayDiff(tripStart(), tripEnd()) + 1;
+  }
+  function originalDailyRate(){
+    const days = totalTripDaysCount();
+    if (days <= 0) return 0;
+    return totalBudget() / days;
+  }
+  function aggregateSurplusDeficit(dateStr){
+    // Positive = under budget so far (surplus), negative = over budget (deficit).
+    // Compares actual spend on all fully-elapsed days against a flat, even daily split.
+    const elapsedDays = Math.max(0, dayDiff(tripStart(), fromISODate(dateStr)));
+    return (originalDailyRate() * elapsedDays) - spentBefore(dateStr);
+  }
   function allowanceForDay(dateStr){
+    if (trip.carryoverMode === 'separate'){
+      return originalDailyRate();
+    }
     const remaining = totalBudget() - spentBefore(dateStr);
     const days = remainingDaysFrom(dateStr);
     if (days <= 0) return 0;
@@ -1078,6 +1185,7 @@
   function render(){
     renderHeader();
     renderFx();
+    renderBudgetSummary();
     renderStub();
     renderCategories();
     renderExpenseForm();
@@ -1153,7 +1261,45 @@
       remainingDays + ' day' + (remainingDays===1?'':'s') + ' left in trip<br>' +
       fmtTarget(remainingBudget) + ' remaining of ' + fmtTarget(totalBudget()) + '<br>' +
       fmtTarget(spentSoFar) + ' spent so far';
+
+    // mode radios
+    document.getElementById('modeCarryover').checked = trip.carryoverMode !== 'separate';
+    document.getElementById('modeSeparate').checked = trip.carryoverMode === 'separate';
+
+    // breakdown line — only meaningful in carryover mode, where today's number
+    // has already been adjusted by past over/underspending
+    const breakdownEl = document.getElementById('stubBreakdown');
+    if (trip.carryoverMode === 'separate'){
+      breakdownEl.style.display = 'block';
+      breakdownEl.innerHTML = 'Flat rate — unaffected by past spending. Your running surplus/deficit is tracked separately above.';
+    } else {
+      const base = originalDailyRate();
+      const adjustment = allowance - base;
+      const adjLabel = adjustment >= 0
+        ? ('+' + fmtTarget(adjustment) + ' from surplus')
+        : ('−' + fmtTarget(Math.abs(adjustment)) + ' from deficit');
+      breakdownEl.style.display = 'block';
+      breakdownEl.innerHTML = 'Base rate ' + fmtTarget(base) + '/day, ' + adjLabel + ' spread across remaining days';
+    }
   }
+
+  function renderBudgetSummary(){
+    const input = document.getElementById('totalBudgetInput');
+    if (document.activeElement !== input){
+      input.value = Math.round(totalBudget());
+    }
+    document.getElementById('totalBudgetCurrencyLabel').textContent = trip.targetCurrency;
+
+    const todayStr = toISODate(clampedToday());
+    const remaining = totalBudget() - totalSpent();
+    document.getElementById('totalRemainingValue').textContent = fmtTarget(remaining);
+
+    const surplus = aggregateSurplusDeficit(todayStr);
+    const surplusEl = document.getElementById('totalSurplusValue');
+    surplusEl.textContent = (surplus >= 0 ? '+' : '−') + fmtTarget(Math.abs(surplus));
+    surplusEl.className = 'bs-value ' + (surplus >= 0 ? 'surplus' : 'deficit');
+  }
+
 
   function renderCategories(){
     const list = document.getElementById('catList');
@@ -1517,6 +1663,45 @@
       const val = Number(e.target.value);
       if (val > 0){
         trip.exchangeRate = val;
+        persist();
+      }
+    });
+
+    document.getElementById('totalBudgetInput').addEventListener('change', (e) => {
+      const newTotal = Number(e.target.value);
+      if (isNaN(newTotal) || newTotal < 0) return;
+      const oldTotal = totalBudget();
+
+      if (trip.categories.length === 0){
+        // no categories exist yet — create one to hold the whole budget
+        trip.categories.push({
+          id: 'cat_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+          name: 'General',
+          budget: newTotal
+        });
+      } else if (oldTotal > 0){
+        // scale every category proportionally so ratios are preserved
+        const ratio = newTotal / oldTotal;
+        trip.categories.forEach(c => {
+          c.budget = Math.round((Number(c.budget) || 0) * ratio);
+        });
+      } else {
+        // old total was 0 — split the new amount evenly across existing categories
+        const share = Math.round(newTotal / trip.categories.length);
+        trip.categories.forEach(c => { c.budget = share; });
+      }
+      persist();
+    });
+
+    document.getElementById('modeCarryover').addEventListener('change', (e) => {
+      if (e.target.checked){
+        trip.carryoverMode = 'carryover';
+        persist();
+      }
+    });
+    document.getElementById('modeSeparate').addEventListener('change', (e) => {
+      if (e.target.checked){
+        trip.carryoverMode = 'separate';
         persist();
       }
     });
