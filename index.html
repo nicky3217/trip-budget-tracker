@@ -209,6 +209,15 @@
     color:var(--gold);
     margin-top:4px;
   }
+  .stub .krw.over-budget{
+    color:#E8938E;
+  }
+  .stub-original{
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:rgba(246,242,232,0.6);
+    margin-top:6px;
+  }
   .stub .meta{
     text-align:right;
     font-family:var(--mono);
@@ -283,6 +292,9 @@
   .stub-cat-row .stub-cat-amt{
     text-align:right;
     white-space:nowrap;
+  }
+  .stub-cat-row .stub-cat-amt.over-budget{
+    color:#E8938E;
   }
   .stub-cat-row .stub-cat-amt .usd-sub{
     display:block;
@@ -903,9 +915,10 @@
 
   <section class="stub">
     <div>
-      <div class="label" id="stubLabel">Today's Allowance</div>
+      <div class="label" id="stubLabel">Remaining Today</div>
       <div class="krw" id="stubKrw">₩0</div>
       <div class="usd" id="stubUsd">$0.00</div>
+      <div class="stub-original" id="stubOriginal"></div>
 
       <div class="currency-toggle stub-view-toggle">
         <button type="button" class="toggle-btn" id="stubViewTotal" data-view="total">Total</button>
@@ -1345,6 +1358,11 @@
       .filter(e => e.categoryId === catId && fromISODate(e.date) < d)
       .reduce((s,e) => s + (Number(e.amount)||0), 0);
   }
+  function categorySpentOn(catId, dateStr){
+    return trip.expenses
+      .filter(e => e.categoryId === catId && e.date === dateStr)
+      .reduce((s,e) => s + (Number(e.amount)||0), 0);
+  }
   function remainingDaysFrom(dateStr){
     const d = fromISODate(dateStr);
     return dayDiff(d, tripEnd()) + 1;
@@ -1454,19 +1472,27 @@
     const today = clampedToday();
     const todayStr = toISODate(today);
     const allowance = allowanceForDay(todayStr);
+    const spentToday = spentOn(todayStr);
+    const remainingToday = allowance - spentToday;
     const remainingDays = remainingDaysFrom(todayStr);
     const remainingBudget = totalBudget() - spentBefore(todayStr);
     const spentSoFar = totalSpent();
 
-    document.getElementById('stubKrw').textContent = fmtTarget(allowance);
-    document.getElementById('stubUsd').textContent = fmtBase(toBase(allowance));
+    const stubKrwEl = document.getElementById('stubKrw');
+    const stubUsdEl = document.getElementById('stubUsd');
+    stubKrwEl.textContent = fmtTarget(remainingToday);
+    stubUsdEl.textContent = fmtBase(toBase(remainingToday));
+    stubKrwEl.classList.toggle('over-budget', remainingToday < 0);
 
     const now = new Date();
     const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     document.getElementById('stubLabel').textContent =
-      (t < tripStart()) ? "Day 1 Allowance (projected)" :
-      (t > tripEnd()) ? "Final Day Allowance (trip ended)" :
-      "Today's Allowance";
+      (t < tripStart()) ? "Remaining — Day 1 (projected)" :
+      (t > tripEnd()) ? "Remaining — Final Day (trip ended)" :
+      "Remaining Today";
+
+    document.getElementById('stubOriginal').textContent =
+      'Original allowance: ' + fmtTarget(allowance) + (spentToday > 0 ? ' · spent ' + fmtTarget(spentToday) + ' so far today' : '');
 
     document.getElementById('stubMeta').innerHTML =
       remainingDays + ' day' + (remainingDays===1?'':'s') + ' left in trip<br>' +
@@ -1477,8 +1503,7 @@
     document.getElementById('modeCarryover').checked = trip.carryoverMode !== 'separate';
     document.getElementById('modeSeparate').checked = trip.carryoverMode === 'separate';
 
-    // breakdown line — only meaningful in carryover mode, where today's number
-    // has already been adjusted by past over/underspending
+    // breakdown line — explains how the original allowance (before today's spending) was derived
     const breakdownEl = document.getElementById('stubBreakdown');
     if (trip.carryoverMode === 'separate'){
       breakdownEl.style.display = 'block';
@@ -1508,12 +1533,14 @@
       } else {
         trip.categories.forEach(cat => {
           const catAllowance = categoryAllowanceForDay(cat, todayStr);
+          const catSpentToday = categorySpentOn(cat.id, todayStr);
+          const catRemaining = catAllowance - catSpentToday;
           const row = document.createElement('div');
           row.className = 'stub-cat-row';
           row.innerHTML =
             '<span class="stub-cat-name">' + escapeHtml(cat.name) + '</span>' +
-            '<span class="stub-cat-amt">' + fmtTarget(catAllowance) +
-            '<span class="usd-sub">' + fmtBase(toBase(catAllowance)) + '</span></span>';
+            '<span class="stub-cat-amt' + (catRemaining < 0 ? ' over-budget' : '') + '">' + fmtTarget(catRemaining) +
+            '<span class="usd-sub">' + fmtBase(toBase(catRemaining)) + ' · of ' + fmtTarget(catAllowance) + '</span></span>';
           catListEl.appendChild(row);
         });
       }
