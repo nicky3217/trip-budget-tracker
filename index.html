@@ -960,7 +960,7 @@
     <div class="log-form">
       <div class="field">
         <label>Date</label>
-        <input type="date" id="expDate">
+        <input type="date" id="expDate" autocomplete="off">
       </div>
       <div class="field">
         <label>Category</label>
@@ -1061,6 +1061,7 @@
   let realtimeChannel = null;
   let totalBudgetDisplayCurrency = 'target'; // 'target' or 'base' — which currency the Trip Budget input shows/accepts
   let stubViewMode = 'total'; // 'total' or 'category' — what the daily allowance breakdown shows
+  let expDateManuallySet = false; // true once the user picks a date for the in-progress entry, so re-renders don't reset it
 
   function defaultTripPayload(){
     return {
@@ -1078,7 +1079,15 @@
   }
 
   // ---------- date helpers (relative to the loaded trip) ----------
-  function toISODate(d){ return d.toISOString().slice(0,10); }
+  // Format as YYYY-MM-DD using LOCAL date parts. Do NOT use toISOString() here —
+  // it converts to UTC, which shifts the calendar day backwards in any timezone
+  // east of UTC (e.g. Korea, UTC+9) and forwards for late-evening times west of it.
+  function toISODate(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
   function fromISODate(s){ return new Date(s + 'T00:00:00'); }
   function dayDiff(a, b){ return Math.round((b - a) / 86400000); }
 
@@ -1732,7 +1741,11 @@
     const dateInput = document.getElementById('expDate');
     dateInput.min = trip.startDate;
     dateInput.max = trip.endDate;
-    if (!dateInput.value){
+    // Always refresh the default to today, EXCEPT when the user is mid-edit of an
+    // existing expense (that date belongs to the entry) or actively typing in the
+    // field. Setting it only-when-empty left stale values behind across reloads,
+    // since iOS Safari restores form field values on page restore.
+    if (!editingExpenseId && !expDateManuallySet && document.activeElement !== dateInput){
       dateInput.value = toISODate(clampedToday());
     }
     const sel = document.getElementById('expCategory');
@@ -1858,6 +1871,7 @@
   }
 
   function resetExpenseForm(){
+    expDateManuallySet = false;
     document.getElementById('expDate').value = toISODate(clampedToday());
     document.getElementById('expAmount').value = '';
     document.getElementById('expNote').value = '';
@@ -2103,8 +2117,15 @@
 
       amountInput.value = '';
       noteInput.value = '';
+      expDateManuallySet = false; // next entry goes back to defaulting to today
       updateExpenseFormMode();
       persist();
+    });
+
+    document.getElementById('expDate').addEventListener('change', () => {
+      // user deliberately chose a date — don't let re-renders (including the other
+      // person's realtime edits) overwrite it before they submit
+      expDateManuallySet = true;
     });
 
     document.getElementById('expCancelBtn').addEventListener('click', () => {
